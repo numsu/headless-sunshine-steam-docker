@@ -475,6 +475,23 @@ chmod 0755 /tmp/steam-headless-bin/zenity
 
 STEAM_CLIENT="${GAMER_HOME}/.steam/debian-installation/ubuntu12_32/steam"
 
+shutdown_steam() {
+    local status
+
+    timeout --signal=TERM --kill-after=1s 5s \
+        su - "$GAMER_USER" -c \
+        'PATH="/tmp/steam-headless-bin:/usr/local/bin:/usr/games:/usr/bin:/bin" DISPLAY=:0 steam -shutdown' \
+        && return 0
+
+    status=$?
+
+    if [[ "$status" -eq 124 || "$status" -eq 137 ]]; then
+        echo "Steam shutdown timed out after 5 seconds; continuing."
+    else
+        echo "Steam shutdown exited with status ${status}; continuing."
+    fi
+}
+
 if [[ ! -x "$STEAM_CLIENT" ]]; then
     echo "Steam client missing; bootstrapping into ${GAMER_HOME}..."
 
@@ -501,27 +518,29 @@ if [[ ! -x "$STEAM_CLIENT" ]]; then
     # Give the updater a moment to finish committing files.
     sleep 5
 
-    su - "$GAMER_USER" -c \
-        'PATH="/tmp/steam-headless-bin:/usr/local/bin:/usr/games:/usr/bin:/bin" DISPLAY=:0 steam -shutdown' \
-        || true
+    shutdown_steam
+
+    kill "$STEAM_BOOTSTRAP_PID" 2>/dev/null || true
+    sleep 1
+    kill -KILL "$STEAM_BOOTSTRAP_PID" 2>/dev/null || true
 
     wait "$STEAM_BOOTSTRAP_PID" 2>/dev/null || true
 else
     echo "Checking Steam client installation/update..."
 
     # Run the updater without leaving Steam active before Sunshine starts it.
-    su - "$GAMER_USER" -c \
-        'PATH="/tmp/steam-headless-bin:/usr/local/bin:/usr/games:/usr/bin:/bin" DISPLAY=:0 steam -shutdown' \
-        || true
+    shutdown_steam
 fi
 
 # Do not let an updater-owned Steam process leak into the Sunshine session.
-for _ in $(seq 1 60); do
+for _ in $(seq 1 10); do
     if ! pgrep -u "$GAMER_UID" -x steam >/dev/null 2>&1; then
         break
     fi
     sleep 0.5
 done
+
+pkill -KILL -u "$GAMER_UID" -x steam 2>/dev/null || true
 
 su - "$GAMER_USER" -c \
     'exec dbus-run-session -- /usr/local/bin/gaming-session' &
