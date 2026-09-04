@@ -2,16 +2,16 @@
 
 A Dockerized, headless Linux Sunshine and Steam host built around:
 
-- [Sunshine](https://github.com/LizardByte/Sunshine)
-- [Steam](https://store.steampowered.com/about/)
-- [Moonlight](https://moonlight-stream.org/)
-- NVIDIA NVENC + NvFBC
-- Headless Xorg
-- Openbox
-- Picom
-- PipeWire
+- [Sunshine](https://github.com/LizardByte/Sunshine) — hosts and streams the desktop and games
+- [Steam](https://store.steampowered.com/about/) — installs, manages and launches games
+- [Moonlight](https://moonlight-stream.org/) — connects clients to the Sunshine host
+- NVIDIA NVENC + NvFBC — provides hardware encoding and display capture
+- Headless Xorg — creates the virtual display without a physical monitor
+- Openbox — provides a lightweight window manager
+- Picom — composites the virtual desktop
+- PipeWire — provides headless game audio
 
-The goal is to turn a Linux server with an NVIDIA GPU into a console-like Sunshine and Steam appliance with a single command:
+The goal is to turn a Linux server with an NVIDIA GPU into a console-like Sunshine and Steam appliance with a single command (with prerequisites installed):
 
 ```bash
 docker compose up -d --build
@@ -31,8 +31,6 @@ Steam is installed and updated automatically. Sunshine starts with a fresh defau
 - Persistent Steam login, settings and Proton state
 - Persistent Sunshine configuration and pairing state
 - Automatic Moonlight client-resolution switching
-- Dynamically creates unusual XrandR modes when required
-- Headless PipeWire audio
 - Mouse, keyboard and controller passthrough through Sunshine
 - Selectable NVIDIA GPU for multi-GPU hosts
 
