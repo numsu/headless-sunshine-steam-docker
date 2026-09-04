@@ -1,0 +1,49 @@
+services:
+  sunshine-steam:
+    build:
+      context: .
+    image: headless-sunshine-steam:local
+    container_name: headless-sunshine-steam
+    restart: unless-stopped
+
+    # Host networking allows Moonlight discovery and Sunshine traffic.
+    network_mode: host
+
+    ipc: host
+    shm_size: "4gb"
+
+    environment:
+      SUNSHINE_CORS_ORIGIN: ${SUNSHINE_CORS_ORIGIN}
+      NVIDIA_VISIBLE_DEVICES: "${NVIDIA_GPU_ID}"
+      NVIDIA_DRIVER_CAPABILITIES: all
+
+    runtime: nvidia
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${NVIDIA_GPU_ID}"]
+              capabilities: [gpu]
+
+    devices:
+      - /dev/uinput:/dev/uinput
+      - /dev/dri:/dev/dri
+
+    volumes:
+      - /dev/input:/dev/input
+      - /run/udev:/run/udev:ro
+      - ./data:/home/gamer
+      - ./data/games/SteamLibrary:/games
+
+    device_cgroup_rules:
+      - "c 13:* rwm"
+      - "c 226:* rwm"
+
+    cap_add:
+      - SYS_NICE
+
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
