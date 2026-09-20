@@ -1,0 +1,60 @@
+name: Update Bolt
+
+on:
+  schedule:
+    - cron: '43 10 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: update-bolt
+  cancel-in-progress: false
+
+# GitHub runners cannot read the Sunshine host's .env file.
+# Explicitly check and build the optional Bolt-enabled image here.
+env:
+  ENABLE_BOLT: 'true'
+
+jobs:
+  update:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Test Bolt updater
+        run: python3 -m unittest discover -s tests -p test_update_bolt.py
+
+      - name: Retrieve latest stable release and update both pins
+        id: bolt
+        run: python3 scripts/update-bolt.py
+
+      - name: Build updated image with Bolt enabled
+        if: steps.bolt.outputs.changed == 'true'
+        run: docker build --build-arg ENABLE_BOLT="$ENABLE_BOLT" --tag bolt-update:check .
+
+      - name: Open or update pull request
+        if: env.ENABLE_BOLT == 'true'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          branch: automation/update-bolt
+          delete-branch: true
+          add-paths: Dockerfile
+          commit-message: 'chore: update Bolt to ${{ steps.bolt.outputs.version }}'
+          title: 'chore: update Bolt to ${{ steps.bolt.outputs.version }}'
+          body: |
+            Updates the pinned Bolt version and exact source commit.
+
+            Release notes: https://codeberg.org/Adamcake/Bolt/releases/tag/${{ steps.bolt.outputs.version }}
+
+            Validated with an ENABLE_BOLT=true Docker build using the existing CEF pins.
+            CEF updates require separate review of the version and archive checksum.
+            On the host, keep ENABLE_BOLT=true in .env and rebuild after merging:
+            `docker compose up -d --build sunshine-steam`
+
+            Verify launcher rendering, Jagex login, and RuneLite launch on the host.

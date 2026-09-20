@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+
+# The mounted home hides directories created while building the image.
+# Repair these parent directories themselves, not their Steam/game contents.
+for directory in /home/gamer/.config /home/gamer/.cache /home/gamer/.local \
+    /home/gamer/.local/share /home/gamer/.local/state; do
+    install -d -o gamer -g gamer "$directory"
+done
+
+# Prior root-run launcher experiments can also leave root-owned Bolt files.
+# Do not follow symlinks or cross filesystems while repairing Bolt's own state.
+for directory in /home/gamer/.config/bolt-launcher \
+    /home/gamer/.local/share/bolt-launcher /run/user/1000/bolt-launcher; do
+    install -d -o gamer -g gamer -m 0700 "$directory"
+    find "$directory" -xdev ! -type l \
+        -exec chown gamer:gamer {} + -exec chmod u+rwX {} +
+done

@@ -1,12 +1,58 @@
 # syntax=docker/dockerfile:1.7
 
-FROM ubuntu:24.04
+ARG ENABLE_BOLT=false
+
+# Compile against the same Ubuntu userspace and CEF bundle used at runtime.
+FROM ubuntu:24.04 AS bolt-builder
+ARG DEBIAN_FRONTEND=noninteractive
+ARG ENABLE_BOLT
+ARG BOLT_VERSION=0.24.0
+ARG BOLT_COMMIT=d8589d80f9849e51f121646e31daa5be7038da28
+ARG CEF_VERSION=139.0.7258.139
+ARG CEF_SHA256=aeb98ff1f621c8f7c5f0be6c34acefaf4fe4be763004a9d2a9e933d1cd914650
+ARG BOLT_BUILD_JOBS=2
+
+COPY --chmod=0755 scripts/build-bolt /usr/local/bin/build-bolt
+RUN mkdir -p /out \
+    && case "$ENABLE_BOLT" in \
+        true) \
+            test "$(dpkg --print-architecture)" = amd64 \
+            && apt-get update \
+            && apt-get install -y --no-install-recommends \
+                ca-certificates curl git build-essential cmake ninja-build \
+                pkg-config libx11-dev libxcb1-dev libarchive-dev xz-utils \
+                libnss3 libnspr4 libatk1.0-0t64 libatk-bridge2.0-0t64 \
+                libatspi2.0-0t64 libgtk-3-0t64 libcups2t64 libasound2t64 \
+                libgbm1 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 \
+                libxfixes3 libxrandr2 libglib2.0-0t64 libdbus-1-3 \
+                libxext6 libxshmfence1 \
+            && /usr/local/bin/build-bolt ;; \
+        false) ;; \
+        *) echo 'ENABLE_BOLT must be true or false' >&2; exit 1 ;; \
+    esac
+
+# Stage optional integration assets only when Bolt is enabled. Bind mounts keep
+# the cover, app template, and home helper out of disabled image layers entirely.
+RUN --mount=type=bind,source=sunshine-config,target=/assets \
+    --mount=type=bind,source=scripts,target=/scripts \
+    if [ "$ENABLE_BOLT" = true ]; then \
+        install -d -m 0755 /out/usr/local/share/headless-sunshine-steam/covers \
+        && chmod 0755 /out/usr/local/share/headless-sunshine-steam \
+        && install -m 0644 /assets/osrs-app.json /out/usr/local/share/headless-sunshine-steam/osrs-app.json \
+        && install -m 0644 /assets/covers/bolt-rs.png /out/usr/local/share/headless-sunshine-steam/covers/bolt-rs.png \
+        && install -m 0755 /scripts/prepare-bolt-home /out/usr/local/bin/prepare-bolt-home; \
+    fi
+
+FROM ubuntu:24.04 AS runtime
 
 ARG DEBIAN_FRONTEND=noninteractive
+ARG ENABLE_BOLT
 
 # Pin Sunshine and Heroic for reproducible builds.
-ARG SUNSHINE_VERSION=v2026.516.143833
+ARG SUNSHINE_VERSION=v2026.914.233613
 ARG HEROIC_VERSION=v2.22.3
+# Optional override for releases using a different package naming convention.
+ARG SUNSHINE_DEB_NAME
 
 ENV NVIDIA_DRIVER_CAPABILITIES=all
 
@@ -17,6 +63,8 @@ RUN dpkg --add-architecture i386 \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
+        wget \
+        python3 \
         software-properties-common \
     && add-apt-repository -y multiverse \
     && apt-get update \
@@ -72,8 +120,9 @@ RUN dpkg --add-architecture i386 \
 RUN ln -sf /usr/games/steam /usr/local/bin/steam
 
 # Install Sunshine.
-RUN curl -fL \
-        "https://github.com/LizardByte/Sunshine/releases/download/${SUNSHINE_VERSION}/sunshine-ubuntu-24.04-amd64.deb" \
+RUN sunshine_deb="${SUNSHINE_DEB_NAME:-sunshine_${SUNSHINE_VERSION#v}-1+ubuntu24.04_amd64.deb}" \
+    && curl -fL \
+        "https://github.com/LizardByte/Sunshine/releases/download/${SUNSHINE_VERSION}/${sunshine_deb}" \
         -o /tmp/sunshine.deb \
     && apt-get update \
     && apt-get install -y /tmp/sunshine.deb \
@@ -104,7 +153,36 @@ RUN ln -sf /opt/Heroic/heroic /usr/local/bin/heroic \
     && test -f /usr/share/sunshine/heroic.png
 
 COPY --chmod=0644 sunshine-config/apps.json /usr/local/share/headless-sunshine-steam/apps.json
+COPY --chmod=0755 scripts/register-bolt-app /usr/local/bin/register-bolt-app
+COPY --chmod=0755 scripts/prepare-openbox-config /usr/local/bin/prepare-openbox-config
+COPY --chmod=0755 scripts/sunshine-resolution /usr/local/bin/sunshine-resolution
 COPY --chmod=0644 heroic-config.json /usr/local/share/headless-sunshine-steam/heroic-config.json
+
+# Only runtime libraries and Java for RuneLite enter the optional gaming image.
+RUN if [ "$ENABLE_BOLT" = true ]; then \
+        apt-get update \
+        && apt-get install -y --no-install-recommends \
+            libarchive13t64 libstdc++6 libnss3 libnspr4 libatk1.0-0t64 \
+            libatk-bridge2.0-0t64 libatspi2.0-0t64 libgtk-3-0t64 \
+            libcups2t64 libasound2t64 libgbm1 libdrm2 libxkbcommon0 \
+            libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
+            libglib2.0-0t64 libdbus-1-3 libx11-6 libxcb1 libxext6 \
+            libxshmfence1 fonts-dejavu-core openjdk-17-jre \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
+
+COPY --from=bolt-builder /out/ /
+
+# Fail the image build on missing libraries or incompatible symbol versions.
+RUN if [ "$ENABLE_BOLT" = true ]; then \
+        for binary in /opt/bolt-launcher/bolt /opt/bolt-launcher/*.so*; do \
+            ldd "$binary" > /tmp/bolt-ldd.txt 2>&1 \
+                || { cat /tmp/bolt-ldd.txt; exit 1; }; \
+            cat /tmp/bolt-ldd.txt; \
+            if grep -q 'not found' /tmp/bolt-ldd.txt; then exit 1; fi; \
+        done; \
+        rm -f /tmp/bolt-ldd.txt; \
+    fi
 
 # Create the user that owns the persistent home directory.
 RUN set -eux; \
@@ -140,6 +218,19 @@ RUN install -d -o gamer -g gamer \
       /home/gamer/.local/state \
       /home/gamer/.cache
 
+# Validate cover access as Sunshine's actual runtime user, not build-time root.
+USER gamer
+RUN if [ "$ENABLE_BOLT" = true ]; then \
+        python3 -c "from pathlib import Path; p = Path('/usr/local/share/headless-sunshine-steam/covers/bolt-rs.png'); assert p.open('rb').read(8).hex() == '89504e470d0a1a0a', 'Invalid cover PNG'"; \
+    else \
+        test ! -e /usr/local/bin/bolt \
+        && test ! -e /opt/bolt-launcher \
+        && test ! -e /usr/local/bin/prepare-bolt-home \
+        && test ! -e /usr/local/share/headless-sunshine-steam/osrs-app.json \
+        && test ! -e /usr/local/share/headless-sunshine-steam/covers/bolt-rs.png; \
+    fi
+USER root
+
 WORKDIR /home/gamer
 
 # Generate a headless Xorg configuration for the exposed NVIDIA GPU.
@@ -162,6 +253,32 @@ FUNCTION_DEC=$((16#$FUNCTION))
 
 XORG_BUS_ID="PCI:${BUS_DEC}:${SLOT_DEC}:${FUNCTION_DEC}"
 
+XORG_DISPLAY="${XORG_DISPLAY:-DP-0}"
+XORG_WIDTH="${XORG_WIDTH:-3840}"
+XORG_HEIGHT="${XORG_HEIGHT:-2160}"
+
+# These values enter Xorg configuration text. Accept one display identifier and
+# bounded decimal dimensions, not arbitrary configuration or modeline content.
+if [[ ! "$XORG_DISPLAY" =~ ^(DP|DVI-D|DVI-I|HDMI|DFP|CRT)-[0-9]+$ ]] \
+    || [[ ! "$XORG_WIDTH" =~ ^[1-9][0-9]{1,4}$ ]] \
+    || [[ ! "$XORG_HEIGHT" =~ ^[1-9][0-9]{1,4}$ ]]; then
+    echo 'Invalid XORG_DISPLAY, XORG_WIDTH or XORG_HEIGHT.' >&2
+    exit 1
+fi
+if (( XORG_WIDTH > 32768 || XORG_HEIGHT > 32768 )); then
+    echo 'Xorg startup dimensions must not exceed 32768.' >&2
+    exit 1
+fi
+
+# Preserve the original 4K timings unless an installation overrides the size.
+if [[ "$XORG_WIDTH" == 3840 && "$XORG_HEIGHT" == 2160 ]]; then
+    XORG_MODE=3840x2160_60
+    XORG_MODELINE='Modeline "3840x2160_60" 533.25 3840 3888 3920 4000 2160 2163 2168 2222 +HSync -VSync'
+else
+    XORG_MODELINE="$(cvt -r "$XORG_WIDTH" "$XORG_HEIGHT" 60 | grep '^Modeline')"
+    XORG_MODE="$(awk '{print $2}' <<< "$XORG_MODELINE" | tr -d '\"')"
+fi
+
 mkdir -p /etc/X11/xorg.conf.d
 
 cat > /etc/X11/xorg.conf.d/20-nvidia.conf <<XORG
@@ -175,7 +292,7 @@ Section "Monitor"
     HorizSync 30-160
     VertRefresh 30-120
 
-    Modeline "3840x2160_60" 533.25 3840 3888 3920 4000 2160 2163 2168 2222 +HSync -VSync
+    ${XORG_MODELINE}
 
     Option "Enable" "true"
 EndSection
@@ -187,13 +304,13 @@ Section "Device"
 
     Option "AllowEmptyInitialConfiguration" "True"
 
-    Option "ConnectedMonitor" "DP-0"
-    Option "UseDisplayDevice" "DP-0"
+    Option "ConnectedMonitor" "${XORG_DISPLAY}"
+    Option "UseDisplayDevice" "${XORG_DISPLAY}"
     Option "UseEDID" "False"
 
     Option "ModeValidation" "NoEdidModes,NoDFPNativeResolutionCheck,NoVirtualSizeCheck,NoMaxPClkCheck,NoHorizSyncCheck,NoVertRefreshCheck"
 
-    Option "MetaModes" "DP-0: 3840x2160_60 +0+0"
+    Option "MetaModes" "${XORG_DISPLAY}: ${XORG_MODE} +0+0"
 
     Option "Coolbits" "4"
 EndSection
@@ -206,13 +323,13 @@ Section "Screen"
 
     SubSection "Display"
         Depth 24
-        Modes "3840x2160_60"
-        Virtual 3840 2160
+        Modes "${XORG_MODE}"
+        Virtual ${XORG_WIDTH} ${XORG_HEIGHT}
     EndSubSection
 EndSection
 XORG
 
-echo "Configured Xorg on ${GPU_BDF} as ${XORG_BUS_ID}"
+echo "Configured Xorg on ${GPU_BDF} as ${XORG_BUS_ID}: ${XORG_DISPLAY} ${XORG_MODE}"
 EOF
 
 RUN chmod +x /usr/local/bin/generate-xorg-config
@@ -220,41 +337,7 @@ RUN chmod +x /usr/local/bin/generate-xorg-config
 # Switch the virtual display to the resolution requested by the client.
 RUN cat > /usr/local/bin/sunshine-resolution-do <<'EOF'
 #!/bin/bash
-set -euo pipefail
-
-export DISPLAY=:0
-
-W="${SUNSHINE_CLIENT_WIDTH:-3840}"
-H="${SUNSHINE_CLIENT_HEIGHT:-2160}"
-FPS="${SUNSHINE_CLIENT_FPS:-60}"
-
-BASE_MODE="${W}x${H}"
-
-# Prefer a mode the NVIDIA driver already exposes.
-if xrandr | grep -qE "^[[:space:]]+${BASE_MODE}[[:space:]]"; then
-    xrandr --output DP-0 --mode "$BASE_MODE"
-    exit 0
-fi
-
-MODELINE="$(cvt "$W" "$H" "$FPS" | grep '^Modeline')"
-NAME="$(awk '{print $2}' <<< "$MODELINE" | tr -d '"')"
-
-# The same dynamically-created mode may already exist from a previous stream.
-if ! xrandr --query | grep -qE "^[[:space:]]+${NAME}[[:space:]]"; then
-    read -r CLOCK H1 H2 H3 H4 V1 V2 V3 V4 HSYNC VSYNC <<< \
-        "$(awk '{print $3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13}' <<< "$MODELINE")"
-
-    xrandr --newmode \
-        "$NAME" "$CLOCK" \
-        "$H1" "$H2" "$H3" "$H4" \
-        "$V1" "$V2" "$V3" "$V4" \
-        "$HSYNC" "$VSYNC"
-fi
-
-# It may exist globally but not yet be associated with DP-0.
-xrandr --addmode DP-0 "$NAME" 2>/dev/null || true
-
-xrandr --output DP-0 --mode "$NAME"
+exec /usr/local/bin/sunshine-resolution do
 EOF
 
 RUN chmod +x /usr/local/bin/sunshine-resolution-do
@@ -273,7 +356,7 @@ if pgrep -x steam >/dev/null 2>&1; then
     timeout --signal=TERM --kill-after=5s 15s steam -shutdown >/dev/null 2>&1 || true
 fi
 
-xrandr --output DP-0 --mode 3840x2160 --rate 60
+exec /usr/local/bin/sunshine-resolution undo
 EOF
 
 RUN chmod +x /usr/local/bin/sunshine-resolution-undo
@@ -371,7 +454,18 @@ fi
 
 pactl set-default-sink headless
 
-openbox &
+# Derive the session configuration each start so persistent homes also receive
+# title bars and the gaming menu, while keeping saved bindings, theme and rules.
+OPENBOX_SOURCE="${XDG_CONFIG_HOME:-$HOME/.config}/openbox/rc.xml"
+if [[ ! -f "$OPENBOX_SOURCE" ]]; then
+    OPENBOX_SOURCE=/etc/xdg/openbox/rc.xml
+fi
+OPENBOX_CONFIG="$XDG_RUNTIME_DIR/openbox-rc.xml"
+if ! /usr/local/bin/prepare-openbox-config "$OPENBOX_SOURCE" "$OPENBOX_CONFIG"; then
+    echo 'Unable to read saved Openbox settings; applying the gaming menu to the default configuration.' >&2
+    /usr/local/bin/prepare-openbox-config /etc/xdg/openbox/rc.xml "$OPENBOX_CONFIG"
+fi
+openbox --config-file "$OPENBOX_CONFIG" &
 PIDS+=("$!")
 
 picom --backend glx &
@@ -419,7 +513,7 @@ add_device_group /dev/uinput
 add_device_group /dev/input
 add_device_group /dev/dri
 
-for device in /dev/dri/card* /dev/dri/renderD*; do
+for device in /dev/dri/card* /dev/dri/renderD* /dev/input/event* /dev/input/js*; do
     [[ -e "$device" ]] && add_device_group "$device"
 done
 
@@ -555,6 +649,17 @@ if [[ ! -e "${SUNSHINE_DIR}/apps.json" ]]; then
         --mode=0644 \
         /usr/local/share/headless-sunshine-steam/apps.json \
         "${SUNSHINE_DIR}/apps.json"
+fi
+
+# Register Bolt before Sunshine reads its persistent app list. The installed
+# executable is the source of truth: ENABLE_BOLT is a build-time option.
+if [[ -x /usr/local/bin/bolt ]]; then
+    /usr/local/bin/prepare-bolt-home
+    /usr/local/bin/register-bolt-app \
+        "${SUNSHINE_DIR}/apps.json" \
+        /usr/local/share/headless-sunshine-steam/osrs-app.json
+else
+    /usr/local/bin/register-bolt-app "${SUNSHINE_DIR}/apps.json"
 fi
 
 touch "$SUNSHINE_CONF"

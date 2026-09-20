@@ -1,0 +1,14 @@
+[Unit]
+Description=Create NVIDIA device nodes for headless Sunshine
+After=systemd-modules-load.service
+Before=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/nvidia-modprobe
+ExecStart=/usr/bin/nvidia-modprobe -u
+ExecStart=/usr/bin/nvidia-modprobe -m
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

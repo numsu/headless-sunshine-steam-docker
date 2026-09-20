@@ -1,0 +1,127 @@
+#!/usr/bin/python3
+"""Deduplicate default Desktop tiles and optionally register the Bolt launcher."""
+
+import json
+import os
+from pathlib import Path
+import stat
+import sys
+import tempfile
+
+
+MANAGED_KEY = "x-headless-sunshine-steam-managed"
+LEGACY_COVER = "/usr/local/share/headless-sunshine-steam/covers/bolt-rs.png"
+LEGACY_COMMAND = (
+    "setsid env DISPLAY=:0 /usr/local/bin/bolt "
+    ">> /home/gamer/.local/state/bolt-launcher.log 2>&1"
+)
+
+
+def is_managed_bolt(app):
+    if app.get(MANAGED_KEY) == "bolt":
+        return True
+    # Adopt only the exact launch/artwork signature shipped before ownership
+    # markers existed. A matching display name alone does not establish ownership.
+    return (
+        app.get("name") == "Old School RuneScape"
+        and app.get("cmd", "") == ""
+        and app.get("detached") == [LEGACY_COMMAND]
+        and app.get("image-path") == LEGACY_COVER
+    )
+
+
+def merge_app(config, app):
+    apps = config.setdefault("apps", [])
+    if not isinstance(apps, list) or any(not isinstance(item, dict) for item in apps):
+        raise ValueError("Sunshine apps must be an array of objects")
+    for existing in apps:
+        if is_managed_bolt(existing):
+            # Repair stale desktop/Steam launch fields but preserve artwork,
+            # preparation commands, and other user-customized settings.
+            updated = {**app, **existing, MANAGED_KEY: "bolt",
+                       "cmd": app["cmd"], "detached": app["detached"]}
+            if existing.get("image-path") in (None, "", "desktop.png"):
+                updated["image-path"] = app["image-path"]
+            if updated == existing:
+                return False
+            existing.update(updated)
+            return True
+    if any(existing.get("name") == app["name"] for existing in apps):
+        # Respect a user's independently configured app, without creating a
+        # confusing second tile with the same name.
+        return False
+    apps.append(dict(app))
+    return True
+
+
+def deduplicate_desktops(config):
+    apps = config.get("apps", [])
+    if not isinstance(apps, list) or any(not isinstance(item, dict) for item in apps):
+        raise ValueError("Sunshine apps must be an array of objects")
+    retained = []
+    desktop_signatures = set()
+    for item in apps:
+        plain_desktop = (
+            item.get("name") == "Desktop"
+            and not (item.get("cmd") or "").strip()
+            and not any(command.strip() for command in (item.get("detached") or []))
+        )
+        if plain_desktop:
+            # Only merge equivalent entries. Different prep commands, artwork,
+            # or user settings can represent intentionally separate desktops.
+            normalized = {**item, "cmd": "", "detached": [],
+                          "image-path": item.get("image-path") or "desktop.png"}
+            signature = json.dumps(normalized, sort_keys=True)
+            if signature in desktop_signatures:
+                continue
+            desktop_signatures.add(signature)
+        retained.append(item)
+    if retained == apps:
+        return False
+    config["apps"] = retained
+    return True
+
+
+def sync_apps(config, app=None):
+    changed = deduplicate_desktops(config)
+    if app is not None:
+        return merge_app(config, app) or changed
+    # A disabled build must not advertise the previously installed launcher.
+    apps = config.get("apps", [])
+    retained = [item for item in apps if not is_managed_bolt(item)]
+    if retained != apps:
+        config["apps"] = retained
+        changed = True
+    return changed
+
+
+def main(config_path, app_path=None):
+    path = Path(config_path)
+    config = json.loads(path.read_text(encoding="utf-8"))
+    app = json.loads(Path(app_path).read_text(encoding="utf-8")) if app_path else None
+    if app and not any(is_managed_bolt(item) for item in config.get("apps", [])):
+        if any(item.get("name") == app["name"] for item in config.get("apps", [])):
+            print("Preserving independently configured Old School RuneScape app; "
+                  "rename it to allow automatic Bolt registration.")
+    changed = sync_apps(config, app)
+    if not changed:
+        return
+
+    metadata = path.stat()
+    # Write alongside the original for an atomic replacement on its volume.
+    fd, temporary = tempfile.mkstemp(prefix=".apps-bolt-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            json.dump(config, output, indent=4)
+            output.write("\n")
+        os.chown(temporary, metadata.st_uid, metadata.st_gid)
+        os.chmod(temporary, stat.S_IMODE(metadata.st_mode))
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    print("Updated Sunshine apps (managed Bolt entry and equivalent Desktop duplicates).")
+
+
+if __name__ == "__main__":
+    main(*sys.argv[1:])

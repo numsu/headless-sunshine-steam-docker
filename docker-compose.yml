@@ -2,6 +2,8 @@ services:
   sunshine-steam:
     build:
       context: .
+      args:
+        ENABLE_BOLT: "${ENABLE_BOLT:-false}"
     image: headless-sunshine-steam:local
     container_name: headless-sunshine-steam
     restart: unless-stopped
@@ -14,6 +16,9 @@ services:
       SUNSHINE_CORS_ORIGIN: ${SUNSHINE_CORS_ORIGIN}
       NVIDIA_VISIBLE_DEVICES: "${NVIDIA_GPU_ID}"
       NVIDIA_DRIVER_CAPABILITIES: all
+      XORG_DISPLAY: "${XORG_DISPLAY:-DP-0}"
+      XORG_WIDTH: "${XORG_WIDTH:-3840}"
+      XORG_HEIGHT: "${XORG_HEIGHT:-2160}"
 
     runtime: nvidia
 
@@ -28,6 +33,8 @@ services:
     devices:
       - /dev/uinput:/dev/uinput
       - /dev/dri:/dev/dri
+      # Required for NVIDIA Vulkan presentation; create on the host before startup.
+      - /dev/nvidia-modeset:/dev/nvidia-modeset
 
     volumes:
       - /dev/input:/dev/input

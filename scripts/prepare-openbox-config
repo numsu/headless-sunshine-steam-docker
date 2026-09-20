@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""Build a session config with title bars and a gaming application menu."""
+
+import argparse
+import os
+from pathlib import Path
+import xml.etree.ElementTree as ET
+
+
+def prepare_menu(destination, bolt_available):
+    root = ET.Element("openbox_menu", {"xmlns": "http://openbox.org/"})
+    menu = ET.SubElement(root, "menu", {"id": "root-menu", "label": "Gaming"})
+    launchers = [
+        ("Steam Desktop", "/usr/local/bin/steam steam://open/main"),
+        ("Steam Big Picture", "/usr/local/bin/steam -gamepadui"),
+    ]
+    if bolt_available:
+        launchers.append(("Bolt Launcher", "/usr/local/bin/bolt"))
+    for label, command in launchers:
+        item = ET.SubElement(menu, "item", {"label": label})
+        action = ET.SubElement(item, "action", {"name": "Execute"})
+        ET.SubElement(action, "command").text = command
+    ET.SubElement(menu, "separator")
+    ET.SubElement(menu, "menu", {
+        "id": "client-list-combined-menu", "label": "Windows",
+    })
+    # Reload configuration without offering to end or replace the window manager.
+    item = ET.SubElement(menu, "item", {"label": "Reload Openbox Configuration"})
+    ET.SubElement(item, "action", {"name": "Reconfigure"})
+    ET.indent(root)
+    ET.ElementTree(root).write(destination, encoding="utf-8", xml_declaration=True)
+
+
+def prepare_config(source, destination, *, bolt_available=None):
+    parser = ET.XMLParser(target=ET.TreeBuilder(insert_comments=True))
+    tree = ET.parse(source, parser=parser)
+    root = tree.getroot()
+    namespace = "http://openbox.org/3.4/rc"
+    if root.tag == f"{{{namespace}}}openbox_config":
+        ET.register_namespace("", namespace)
+        prefix = f"{{{namespace}}}"
+    elif root.tag == "openbox_config":
+        prefix = ""
+    else:
+        raise ValueError(f"Not an Openbox configuration: {source}")
+
+    applications = root.find(f"{prefix}applications")
+    if applications is None:
+        applications = ET.SubElement(root, f"{prefix}applications")
+    # Openbox applies later matching rules last. Override saved decor=no rules
+    # for normal windows, without changing their geometry or fullscreen state.
+    rule = ET.SubElement(applications, f"{prefix}application", {
+        "class": "*", "type": "normal",
+    })
+    ET.SubElement(rule, f"{prefix}decor").text = "yes"
+
+    # Load only the managed menu. Loading a saved or distro menu too could
+    # reintroduce its root menu's Exit action and unavailable application entries.
+    menu = root.find(f"{prefix}menu")
+    if menu is None:
+        menu = ET.SubElement(root, f"{prefix}menu")
+    for file_entry in list(menu.findall(f"{prefix}file")):
+        menu.remove(file_entry)
+    menu_path = Path(destination).resolve().with_name("openbox-menu.xml")
+    ET.SubElement(menu, f"{prefix}file").text = str(menu_path)
+    if bolt_available is None:
+        bolt_available = os.access("/usr/local/bin/bolt", os.X_OK)
+    prepare_menu(menu_path, bolt_available)
+    tree.write(destination, encoding="utf-8", xml_declaration=True)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("source", type=Path)
+    parser.add_argument("destination", type=Path)
+    args = parser.parse_args()
+    prepare_config(args.source, args.destination)

@@ -1,0 +1,56 @@
+name: Update Sunshine
+
+on:
+  schedule:
+    - cron: '23 10 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: update-sunshine
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Test release selection
+        run: python3 -m unittest discover -s tests -p test_update_sunshine.py
+
+      - name: Retrieve latest stable release and update Dockerfile
+        id: sunshine
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/update-sunshine.py
+
+      # Validate here: PRs created with GITHUB_TOKEN do not trigger PR workflows.
+      - name: Build updated image with and without Bolt
+        if: steps.sunshine.outputs.changed == 'true'
+        run: |
+          docker build --build-arg ENABLE_BOLT=false --tag sunshine-update:check .
+          docker build --build-arg ENABLE_BOLT=true --tag sunshine-update:bolt-check .
+
+      - name: Open or update pull request
+        uses: peter-evans/create-pull-request@v8
+        with:
+          branch: automation/update-sunshine
+          delete-branch: true
+          add-paths: Dockerfile
+          commit-message: 'chore: update Sunshine to ${{ steps.sunshine.outputs.version }}'
+          title: 'chore: update Sunshine to ${{ steps.sunshine.outputs.version }}'
+          body: |
+            Updates the Dockerfile pin to the latest stable Sunshine release.
+
+            Release notes: https://github.com/LizardByte/Sunshine/releases/tag/${{ steps.sunshine.outputs.version }}
+
+            Validated that the Ubuntu 24.04 amd64 package exists and images build with ENABLE_BOLT=false and ENABLE_BOLT=true.
+            After merging, rebuild and recreate the container on the host with:
+            `docker compose up -d --build sunshine-steam`

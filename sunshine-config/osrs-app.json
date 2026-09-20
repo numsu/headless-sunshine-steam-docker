@@ -1,0 +1,10 @@
+{
+    "x-headless-sunshine-steam-managed": "bolt",
+    "name": "Old School RuneScape",
+    "cmd": "",
+    "detached": [
+        "setsid env DISPLAY=:0 /usr/local/bin/bolt >> /home/gamer/.local/state/bolt-launcher.log 2>&1"
+    ],
+    "image-path": "/usr/local/share/headless-sunshine-steam/covers/bolt-rs.png",
+    "exclude-global-prep-cmd": false
+}

@@ -1,0 +1,43 @@
+#!/bin/sh
+set -eu
+
+# Versioned Codeberg source; its gitlinks also pin all submodules.
+git init /build/bolt
+git -C /build/bolt remote add origin https://codeberg.org/Adamcake/Bolt.git
+git -C /build/bolt fetch --depth=1 origin "refs/tags/${BOLT_VERSION}"
+git -C /build/bolt checkout --detach FETCH_HEAD
+test "$(git -C /build/bolt rev-parse HEAD)" = "$BOLT_COMMIT"
+git -C /build/bolt submodule update --init --recursive --depth=1
+test -s /build/bolt/app/dist/index.html
+
+# This is the native Linux distribution, not the Flatpak SDK variant.
+curl --fail --location --retry 3 \
+    "https://adamcake.com/cef/cef-${CEF_VERSION}-linux-x86_64-minimal-ungoogled.tar.xz" \
+    --output /build/cef.tar.xz
+printf '%s  %s\n' "$CEF_SHA256" /build/cef.tar.xz | sha256sum --check --strict
+mkdir -p /build/cef
+tar -xJf /build/cef.tar.xz -C /build/cef --strip-components=1
+
+# CMake builds libcef_dll_wrapper from CEF_ROOT and installs that same
+# distribution's Release/ and Resources/. Keep the default $ORIGIN RPATH.
+# RuneLite does not need Bolt's optional RuneScape plugin library.
+cmake -S /build/bolt -B /build/bolt-build -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/ \
+    -DCEF_ROOT=/build/cef \
+    -DBOLT_SKIP_LIBRARIES=ON
+cmake --build /build/bolt-build --parallel "$BOLT_BUILD_JOBS"
+DESTDIR=/out cmake --install /build/bolt-build
+
+test -x /out/usr/local/bin/bolt
+test -s /out/opt/bolt-launcher/libcef.so
+test -s /out/opt/bolt-launcher/icudtl.dat
+test -d /out/opt/bolt-launcher/locales
+cmp /build/cef/Release/libcef.so /out/opt/bolt-launcher/libcef.so
+
+# Preserve CEF attribution and the source pins alongside the installed bundle.
+install -m 0644 /build/cef/LICENSE.txt /out/opt/bolt-launcher/CEF-LICENSE.txt
+install -m 0644 /build/bolt/LICENCE /out/opt/bolt-launcher/BOLT-LICENCE
+printf 'Bolt %s\nCommit %s\nCEF %s\nCEF SHA256 %s\n' \
+    "$BOLT_VERSION" "$BOLT_COMMIT" "$CEF_VERSION" "$CEF_SHA256" \
+    > /out/opt/bolt-launcher/build-info.txt

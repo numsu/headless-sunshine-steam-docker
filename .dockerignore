@@ -1,0 +1,13 @@
+.git
+.env
+.env.*
+data
+**/*.rpm
+**/*.deb
+**/*.tar
+**/*.tar.gz
+**/*.tar.xz
+**/*.zip
+**/*.log
+.vscode
+.idea

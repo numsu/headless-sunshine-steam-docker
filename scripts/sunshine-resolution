@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""Switch the active X11 output to Moonlight's requested mode and restore it."""
+
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import sys
+
+
+def run(*args):
+    return subprocess.check_output(args, text=True, stderr=subprocess.STDOUT)
+
+
+def parse_outputs(query):
+    outputs = []
+    current = None
+    for line in query.splitlines():
+        if line and not line[0].isspace():
+            current = None
+            fields = line.split()
+            if len(fields) > 1 and fields[1] == "connected":
+                current = {"name": fields[0], "primary": "primary" in fields,
+                           "modes": {}, "active": None}
+                outputs.append(current)
+        elif current is not None:
+            fields = line.split()
+            if len(fields) < 2:
+                continue
+            rates = []
+            for value in fields[1:]:
+                rate = value.rstrip("*+")
+                if not re.fullmatch(r"\d+(?:\.\d+)?", rate):
+                    continue
+                rates.append(rate)
+                if "*" in value:
+                    current["active"] = {"output": current["name"],
+                                         "mode": fields[0], "rate": rate}
+            if rates:
+                current["modes"][fields[0]] = rates
+    return outputs
+
+
+def select_output(outputs):
+    active = [output for output in outputs if output["active"]]
+    if not active:
+        raise ValueError("No active X11 output found")
+    return next((output for output in active if output["primary"]), active[0])
+
+
+def switch(state_path):
+    output = select_output(parse_outputs(run("xrandr", "--query")))
+    width = int(os.environ.get("SUNSHINE_CLIENT_WIDTH", "3840"))
+    height = int(os.environ.get("SUNSHINE_CLIENT_HEIGHT", "2160"))
+    fps = int(os.environ.get("SUNSHINE_CLIENT_FPS", "60"))
+    if not (8 <= width <= 32768 and 8 <= height <= 32768 and 1 <= fps <= 1000):
+        raise ValueError("Invalid Moonlight resolution or refresh rate")
+    base_mode = f"{width}x{height}"
+    # Search only this output's modes. A mode on another connector cannot be
+    # selected here until it has been associated with the chosen output.
+    mode = next((name for name in output["modes"]
+                 if name == base_mode or name.startswith(base_mode + "_")), None)
+    if mode is None:
+        modeline = next((shlex.split(line) for line in
+                         run("cvt", str(width), str(height), str(fps)).splitlines()
+                         if line.strip().startswith("Modeline ")), None)
+        if modeline is None:
+            raise ValueError("cvt did not return a modeline")
+        mode = modeline[1]
+        try:
+            run("xrandr", "--newmode", *modeline[1:])
+        except subprocess.CalledProcessError as error:
+            # The named mode may already exist globally, or on another output.
+            # addmode below must still succeed before we try to select it.
+            print(error.output, file=sys.stderr)
+        run("xrandr", "--addmode", output["name"], mode)
+        rate_args = []
+    else:
+        # Use the closest supported refresh rate (e.g. 59.97 for a 60 FPS stream).
+        rate = min(output["modes"][mode], key=lambda value: abs(float(value) - fps))
+        rate_args = ["--rate", rate]
+
+    # Keep the original mode across repeated preparation calls until undo.
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    if not state_path.exists():
+        temporary = state_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(output["active"]), encoding="utf-8")
+        temporary.replace(state_path)
+    print(f"Switching {output['name']} to {mode} for Moonlight", flush=True)
+    run("xrandr", "--output", output["name"], "--mode", mode, *rate_args)
+
+
+def restore(state_path):
+    if not state_path.exists():
+        return
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    print(f"Restoring {state['output']} to {state['mode']}", flush=True)
+    run("xrandr", "--output", state["output"], "--mode", state["mode"],
+        "--rate", state["rate"])
+    state_path.unlink()
+
+
+if __name__ == "__main__":
+    os.environ.setdefault("DISPLAY", ":0")
+    runtime = Path(os.environ.get("XDG_RUNTIME_DIR", "/run/user/1000"))
+    state_path = runtime / "sunshine-resolution.json"
+    try:
+        if sys.argv[1:] == ["do"]:
+            switch(state_path)
+        elif sys.argv[1:] == ["undo"]:
+            restore(state_path)
+        else:
+            raise ValueError("Usage: sunshine-resolution do|undo")
+    except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
+        print(f"Resolution switch failed: {error}", file=sys.stderr)
+        if isinstance(error, subprocess.CalledProcessError):
+            print(error.output, file=sys.stderr)
+        sys.exit(1)
