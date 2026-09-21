@@ -273,7 +273,6 @@ if pgrep -x steam >/dev/null 2>&1; then
     timeout --signal=TERM --kill-after=5s 15s steam -shutdown >/dev/null 2>&1 || true
 fi
 
-xrandr --output DP-0 --mode 3840x2160 --rate 60
 EOF
 
 RUN chmod +x /usr/local/bin/sunshine-resolution-undo
@@ -324,6 +323,12 @@ RUN chmod +x /usr/local/bin/launch-heroic
 #   * A file with an unrecognized structure is left untouched.
 #   * Only meant to run at boot, while no Steam process is running.
 COPY --chmod=0755 scripts/steam-register-library.py /usr/local/bin/steam-register-library
+
+# Seed Proton prefixes with the host NVIDIA NGX loader (see the script
+# header for why). Invoked from container-entrypoint at boot; safe to
+# re-run manually any time with: docker exec --user root <container>
+# /usr/local/bin/seed-proton-ngx
+COPY --chmod=0755 scripts/seed-proton-ngx.sh /usr/local/bin/seed-proton-ngx
 
 
 # Start the graphical and audio session.
@@ -448,9 +453,11 @@ chown "$GAMER_USER:$GAMER_USER" \
 
 # The shared /games mount holds every game library in one place:
 # /games/SteamLibrary for Steam and /games/Heroic for Heroic
-# (Epic/GOG/Amazon installs and Wine prefixes).
-mkdir -p /games/SteamLibrary /games/Heroic
-chown "$GAMER_USER:$GAMER_USER" /games/SteamLibrary /games/Heroic
+# (Epic/GOG/Amazon installs and Wine prefixes). The steamapps/ subdirectory
+# marks SteamLibrary as a valid Steam library folder - without it the client
+# drops the entry from libraryfolders.vdf on first launch.
+mkdir -p /games/SteamLibrary/steamapps /games/Heroic
+chown "$GAMER_USER:$GAMER_USER" /games/SteamLibrary /games/SteamLibrary/steamapps /games/Heroic
 
 # Migrate Heroic data out of the Steam library for setups created before
 # /games became the shared parent (back then /games was the Steam library
@@ -491,6 +498,13 @@ fi
 # empty so existing game data is never touched.
 rmdir --ignore-fail-on-non-empty "$GAMER_HOME/Games/Heroic" 2>/dev/null || true
 rmdir --ignore-fail-on-non-empty "$GAMER_HOME/Games" 2>/dev/null || true
+
+# Seed every Heroic prefix with the host NVIDIA NGX loader so DX games can
+# expose DLSS (missing seed dir or prefixes: quiet no-op). Best-effort on
+# purpose: a stale or absent driver layout must never wedge boot.
+if [[ -x /usr/local/bin/seed-proton-ngx ]]; then
+    /usr/local/bin/seed-proton-ngx || true
+fi
 
 install -d \
     --owner="$GAMER_USER" \

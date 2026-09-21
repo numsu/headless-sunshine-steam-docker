@@ -1,5 +1,6 @@
 .env
 data
+.cortexkit
 
 # Python
 __pycache__/

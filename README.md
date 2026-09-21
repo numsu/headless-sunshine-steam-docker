@@ -364,3 +364,34 @@ Start with either:
 
 - the current stable Proton release, or
 - Proton Experimental
+
+---
+
+## DLSS in Proton/Heroic games (NGX seeding)
+
+DirectX games only offer DLSS when the prefix contains NVIDIA's NGX
+loader (`nvngx.dll`, `_nvngx.dll`). Proton copies these from the host
+driver directory next to `libGLX_nvidia` (`.../nvidia/wine`), but
+nvidia-container-toolkit does not expose that subdir inside the
+container — and pressure-vessel can't see it either — so Proton
+silently skips the copy and games list only FSR/XeSS.
+
+This image handles it automatically: `NVIDIA_WINE_DIR` (default
+`/usr/lib/x86_64-linux-gnu/nvidia/wine`) is bind-mounted read-only at
+`/run/host-nvidia-wine`, and the entrypoint seeds every Heroic and Steam
+prefix (`/games/Heroic/Prefixes/*/pfx/.../system32`,
+`/games/SteamLibrary/steamapps/compatdata/*/pfx/.../system32`) at boot via
+`scripts/seed-proton-ngx.sh` (idempotent, 64-bit system32 only, quiet
+no-op when the seed is absent). Re-run the seeder manually for prefixes
+created while the container is already running:
+
+```bash
+docker exec --user root headless-sunshine-steam /usr/local/bin/seed-proton-ngx
+```
+
+Find your driver's directory with `dpkg -L libnvidia-gl | grep
+'nvidia/wine'` and set `NVIDIA_WINE_DIR` accordingly (the source must
+exist — `mkdir -p` an empty dir to disable seeding). Takes effect on
+`docker compose up -d --build` (rebuild needed: the seeder ships in
+the image); existing prefixes are repaired on next boot, new prefixes
+on the boot after they're created.
